@@ -1,0 +1,118 @@
+# For more information see: https://help.github.com/actions/language-and-framework-guides/building-and-testing-java-with-maven
+
+name: Java Maven Beanstalk deploy
+
+env:
+  APP_NAME: my-java-maven-app
+  APP_ENV: dev
+  S3_BUCKET: my-java-maven-app-bucket
+  AWS_REGION: us-east-1
+  AWS_PLATFORM: Docker
+  BUILD_NUMBER: build-${GITHUB_RUN_NUMBER}
+
+on:
+  push:
+    branches: [ develop ]
+  pull_request:
+    branches: [ develop ]
+
+jobs:
+  build_maven:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-java@v1
+        with:
+          java-version: 11
+      - run: |
+          export APP_VERSION=$(mvn org.apache.maven.plugins:maven-help-plugin:3.1.1:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo $APP_VERSION > version
+
+          echo "Initializing maven build"
+          mvn clean install -T 1C -DskipTests -Dproject.build.sourceEncoding=UTF-8
+          cp target/*.jar .
+          echo "Build finished"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: artifacts
+          path: |
+            *.jar
+            version
+            dockerfile-generator.sh
+
+  create_eb_version:
+    needs: [build_maven]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Download all previous job artifacts
+        uses: actions/download-artifact@v2
+        with:
+          path: downloaded
+      - name: Configure AWS credentials 
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: |
+          echo "Going to downloaded artifacts directory"
+          cd ./downloaded/artifacts
+
+          APP_VERSION="$(cat version | sed -e s/.RELEASE//g)"
+          AWS_VERSION_LABEL=${{env.APP_NAME}}-${APP_VERSION}-${{env.BUILD_NUMBER}}
+
+          echo "Generating Dockerfile"
+          chmod +x dockerfile-generator.sh
+          ./dockerfile-generator.sh ${{env.APP_NAME}} ${APP_VERSION} ${{env.APP_ENV}}
+
+          echo "Creating Source Bundle file"
+          mkdir source-bundle
+          cp *.jar source-bundle/
+          cp Dockerfile source-bundle/
+          cd source-bundle/
+          zip -r ${{env.APP_NAME}}.zip .
+          S3_KEY="$AWS_VERSION_LABEL.zip"
+
+          echo "Initializing S3 upload"
+          aws s3 cp ${{env.APP_NAME}}.zip s3://${{env.S3_BUCKET}}/${S3_KEY} --region ${{env.AWS_REGION}}
+
+          echo "Creating Elastic Beanstalk version"
+          aws elasticbeanstalk create-application-version --application-name ${{env.APP_NAME}} --version-label $AWS_VERSION_LABEL --region ${{env.AWS_REGION}} --source-bundle S3Bucket=${{env.S3_BUCKET}},S3Key=${S3_KEY} --description ${{env.APP_NAME}}-${{env.BUILD_NUMBER}} --auto-create-application
+
+  deploy_aws:
+    needs: [create_eb_version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Download version artifact from previous job
+        uses: actions/download-artifact@v2
+        with:
+          path: downloaded
+      - name: Set up Python 3.6 (needed for eb cli)
+        uses: actions/setup-python@v1
+        with:
+          python-version: "3.6"
+      - name: Configure AWS credentials 
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: |
+          echo "Going to downloaded artifacts directory"
+          cd ./downloaded/artifacts
+
+          APP_VERSION="$(cat version | sed -e s/.RELEASE//g)"
+          AWS_VERSION_LABEL=${{env.APP_NAME}}-${APP_VERSION}-${{env.BUILD_NUMBER}}
+
+          echo "Installing Elastic Beanstalk Cli"
+          python -m pip install --upgrade pip
+          pip install awsebcli --upgrade
+          eb --version
+
+          echo "Initializing Elastic Beanstalk deploy"
+          eb init -i ${{env.APP_NAME}} -p ${{env.AWS_PLATFORM}} -k ${{secrets.AWS_ID}} --region ${{env.AWS_REGION}}
+          eb deploy ${{env.APP_NAME}}-${{env.APP_ENV}} --version ${AWS_VERSION_LABEL}
+          echo "Deploy finished"
