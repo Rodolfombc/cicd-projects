@@ -1,8 +1,9 @@
 # my-java-maven-app
 
-Repository containing a working example of GitHub Actions for a Java 11 with Maven project.
+Repository containing a working example of GitHub Actions for a Java 11 with Maven project. This workflow deploys the app to an Elastic Beanstalk environment.
 
-This Java project was created with [Spring Initializr](https://start.spring.io/)
+This Java project was created with [Spring Initializr](https://start.spring.io/).
+
 
 ## Endpoints
 
