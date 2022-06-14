@@ -1,0 +1,56 @@
+version: 0.2
+
+env:
+  variables:
+    APP_NAME: my-awesome-gradle-app
+    APP_ENV: dev
+    APP_VERSION: 1.0.0
+    AWS_REGION: us-east-1
+  secrets-manager:
+    S3_BUCKET: s3/mybeanstalkversionsbucket
+
+phases:
+  pre_build:
+    commands:
+      - echo "Checking java version"
+      - java -version
+      - echo "Checking gradle version"
+      - gradle --version
+    finally:
+      - echo "Finished checking java and gradle"
+  build:
+    commands:
+      - echo "Starting Gradle build"
+      - gradle build -x test
+    finally:
+      - echo "Finished Gradle build"
+  post_build:
+    commands:
+      - echo "Getting APP_VERSION"
+      - export APP_VERSION=$(./gradlew properties --no-daemon --console=plain -q | grep "^version:" | awk '{printf $2}')
+      - echo "Generating Dockerfile"
+      - ./dockerfile-generator.sh $APP_NAME $APP_VERSION $APP_ENV
+      - echo "Finished generating Dockerfile"
+      - echo "Managing Source Bundle files"
+      - mkdir source-bundle
+      - cp -R build/libs/. source-bundle
+      - cp Dockerfile source-bundle
+      - cp -R .ebextensions/ source-bundle
+      - echo "Finished managing Source Bundle files"
+      - echo "Uploading Source Bundle to S3"
+      - cd source-bundle
+      - zip -r $APP_NAME.zip .
+      - AWS_VERSION_LABEL=$APP_NAME-$APP_ENV-$APP_VERSION-codebuild-build-$CODEBUILD_BUILD_NUMBER
+      - S3_KEY="$APP_ENV/$APP_NAME/$AWS_VERSION_LABEL.zip"
+      - aws s3 cp $APP_NAME.zip s3://$S3_BUCKET/$S3_KEY --region $AWS_REGION
+      - echo "Finished uploading Source Bundle to S3"
+      - echo "Creating Elastic Beanstalk version"
+      - aws elasticbeanstalk create-application-version --application-name $APP_NAME --version-label $AWS_VERSION_LABEL --region $AWS_REGION --source-bundle S3Bucket=$S3_BUCKET,S3Key=$S3_KEY --auto-create-application
+      - echo "Finished creating Elastic Beanstalk version"
+      - echo "Updating Elastic Beanstalk environment"
+      - aws elasticbeanstalk update-environment --application-name $APP_NAME --version-label $AWS_VERSION_LABEL --environment-name $APP_NAME-$APP_ENV
+      - echo "Finished updating Elastic Beanstalk environment"
+  
+cache:
+  paths:
+    - '/root/.m2/**/*'
